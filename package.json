@@ -1,0 +1,7 @@
+{
+    "name": "cashly-monorepo",
+    "private": true,
+    "scripts": {
+        "build": "cd Cashly/client && npm install && npm run build"
+    }
+}
