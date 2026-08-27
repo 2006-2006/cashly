@@ -23,7 +23,7 @@ import { cn } from '@/lib/utils';
 // import './BusinessSetup.css'; // Removed, using Tailwind
 
 const BusinessSetup = () => {
-    const { fetchBusinesses, selectedBusiness, user, addLocalBusiness } = useContext(AuthContext);
+    const { fetchBusinesses, selectedBusiness, user, addLocalBusiness, businessesReady } = useContext(AuthContext);
     const navigate = useNavigate();
     const [step, setStep] = useState(1);
     const [templates, setTemplates] = useState([]);
@@ -42,10 +42,12 @@ const BusinessSetup = () => {
     }, []);
 
     useEffect(() => {
-        if (selectedBusiness) {
+        // Only redirect if businesses have been confirmed from the server,
+        // not from stale localStorage cache — prevents the redirect loop.
+        if (businessesReady && selectedBusiness) {
             navigate('/dashboard');
         }
-    }, [selectedBusiness, navigate]);
+    }, [selectedBusiness, businessesReady, navigate]);
 
     const selectTemplate = (key) => {
         setSelectedTemplate(key);

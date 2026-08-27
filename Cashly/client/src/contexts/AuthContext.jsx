@@ -7,6 +7,8 @@ export const AuthProvider = ({ children }) => {
     const [user, setUser] = useState(null);
     const [loading, setLoading] = useState(true);
     const [isInitializing, setIsInitializing] = useState(true);
+    // True only after an actual server fetch completes (not just cache read)
+    const [businessesReady, setBusinessesReady] = useState(false);
     const [businesses, setBusinesses] = useState(() => {
         try {
             const saved = localStorage.getItem('cashly_businesses_cache');
@@ -39,6 +41,7 @@ export const AuthProvider = ({ children }) => {
     const fetchBusinesses = useCallback(async (userId) => {
         if (!userId) {
             setBusinesses([]);
+            setBusinessesReady(true);
             localStorage.removeItem('cashly_businesses_cache');
             return;
         }
@@ -81,6 +84,9 @@ export const AuthProvider = ({ children }) => {
         } catch (error) {
             console.error('Failed to fetch businesses:', error);
             return [];
+        } finally {
+            // Always mark businesses as ready after fetch attempt (success or failure)
+            setBusinessesReady(true);
         }
     }, []);
 
@@ -109,8 +115,13 @@ export const AuthProvider = ({ children }) => {
                     setUser(currentUser);
 
                     if (currentUser) {
-                        // 3. Background sync but wait if it's the first time
-                        await fetchBusinesses(currentUser.id).catch(e => { });
+                        // fetchBusinesses sets businessesReady=true in its finally block
+                        await fetchBusinesses(currentUser.id).catch(e => {
+                            setBusinessesReady(true); // ensure ready even on error
+                        });
+                    } else {
+                        // No user = no businesses to fetch, mark ready immediately
+                        setBusinessesReady(true);
                     }
 
                     // 2. UNLOCK UI
@@ -119,6 +130,7 @@ export const AuthProvider = ({ children }) => {
                 }
             } catch (e) {
                 if (mounted) {
+                    setBusinessesReady(true);
                     setIsInitializing(false);
                     setLoading(false);
                 }
@@ -131,22 +143,22 @@ export const AuthProvider = ({ children }) => {
             if (mounted) {
                 const currentUser = session?.user ?? null;
                 setUser(currentUser);
-                setLoading(false); // Set loading to false immediately after user is set
+                setLoading(false);
 
                 if (event === 'SIGNED_IN') {
                     if (currentUser) {
-                        // Trigger fetch in background but don't block the UI unlock
-                        fetchBusinesses(currentUser.id).catch(e => { });
+                        // fetchBusinesses sets businessesReady=true when done
+                        fetchBusinesses(currentUser.id).catch(e => {
+                            setBusinessesReady(true); // ensure ready even on error
+                        });
                     }
                 } else if (event === 'SIGNED_OUT') {
                     setBusinesses([]);
+                    setBusinessesReady(true);
                     localStorage.removeItem('cashly_businesses_cache');
                     persistBusiness(null);
                     setLoading(false);
                 }
-
-                // Ensure loading is false if auth state changed
-                setLoading(false);
             }
         });
 
@@ -198,6 +210,7 @@ export const AuthProvider = ({ children }) => {
         <AuthContext.Provider value={{
             user,
             loading,
+            businessesReady,
             businesses,
             selectedBusiness,
             selectBusiness,

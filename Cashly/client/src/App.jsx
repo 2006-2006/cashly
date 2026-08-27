@@ -92,16 +92,17 @@ const ProtectedRoute = ({ children }) => {
 
 // Route that requires business selection
 const BusinessRoute = ({ children }) => {
-  const { user, loading, businesses } = useContext(AuthContext);
+  const { user, loading, businesses, businessesReady } = useContext(AuthContext);
 
-  if (loading) return <LoadingScreen />;
+  // Always show loading until auth AND business fetch are both done
+  if (loading || !businessesReady) return <LoadingScreen />;
 
   if (!user) {
     return <Navigate to="/login" replace />;
   }
 
-  // If user has no businesses, redirect to setup
-  if (!loading && (!businesses || businesses.length === 0)) {
+  // Only redirect to setup AFTER we've confirmed (from server) there are no businesses
+  if (businessesReady && (!businesses || businesses.length === 0)) {
     return <Navigate to="/setup" replace />;
   }
 
