@@ -147,6 +147,7 @@ export const AuthProvider = ({ children }) => {
 
                 if (event === 'SIGNED_IN') {
                     if (currentUser) {
+                        setBusinessesReady(false); // Reset ready state for the new user
                         // fetchBusinesses sets businessesReady=true when done
                         fetchBusinesses(currentUser.id).catch(e => {
                             setBusinessesReady(true); // ensure ready even on error
@@ -169,19 +170,24 @@ export const AuthProvider = ({ children }) => {
     }, [fetchBusinesses]);
 
     const login = async (email, password) => {
+        setBusinessesReady(false); // Prevent flash of empty businesses during transition
         // Optimistic UI state could be set here, but LoginPage handles its own isLoading
         const { data, error } = await supabase.auth.signInWithPassword({
             email,
             password,
         });
 
-        if (error) throw error;
+        if (error) {
+            setBusinessesReady(true); // Revert if failed
+            throw error;
+        }
 
         // Note: fetchBusinesses will be triggered by onAuthStateChange SIGNED_IN
         return data;
     };
 
     const register = async (name, email, password) => {
+        setBusinessesReady(false); // Prevent flash of empty businesses during transition
         const { data, error } = await supabase.auth.signUp({
             email,
             password,
@@ -191,7 +197,10 @@ export const AuthProvider = ({ children }) => {
                 },
             },
         });
-        if (error) throw error;
+        if (error) {
+            setBusinessesReady(true); // Revert if failed
+            throw error;
+        }
         return data;
     };
 
