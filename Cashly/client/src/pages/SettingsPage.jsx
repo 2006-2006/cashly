@@ -100,12 +100,22 @@ const SettingsPage = () => {
     const [changingPw, setChangingPw] = useState(false);
 
     const handleChangePassword = async () => {
+        if (!passwordForm.current) return showToast('error', 'Please enter your current password.');
         if (passwordForm.next.length < 8) return showToast('error', 'Password must be at least 8 characters.');
         if (passwordForm.next !== passwordForm.confirm) return showToast('error', 'Passwords do not match.');
         setChangingPw(true);
         try {
+            // 1. Verify current password
+            const { error: verifyError } = await supabase.auth.signInWithPassword({
+                email: user.email,
+                password: passwordForm.current,
+            });
+            if (verifyError) throw new Error('Incorrect current password.');
+
+            // 2. Update to new password
             const { error } = await supabase.auth.updateUser({ password: passwordForm.next });
             if (error) throw error;
+            
             showToast('success', 'Password updated successfully.');
             setPasswordForm({ current: '', next: '', confirm: '' });
         } catch (e) {
