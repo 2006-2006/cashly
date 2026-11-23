@@ -11,6 +11,8 @@ import { motion as Motion, AnimatePresence } from 'framer-motion';
 import api from '../api/axios';
 import { supabase } from '../lib/supabase';
 import AuthContext from '../contexts/AuthContext';
+import { useDisplay } from '../contexts/DisplayContext';
+import { useLocalStorage } from '../hooks/useLocalStorage';
 import Sidebar from '../components/Sidebar';
 import { useNavigate } from 'react-router-dom';
 import { formatDate } from '../lib/formatters';
@@ -83,17 +85,20 @@ const SettingsPage = () => {
     const { user, selectedBusiness, businesses, selectBusiness, logout } = useContext(AuthContext);
     const navigate = useNavigate();
 
-    /* ── toast ── */
+    // ── Display context (global state for Display panel) ──
+    const { display, updateDisplay } = useDisplay();
+
+    // ── toast ──
     const [toast, setToast] = useState(null);
     const showToast = (type, message) => {
         setToast({ type, message });
         setTimeout(() => setToast(null), 3500);
     };
 
-    /* ── active tab ── */
+    // ── active tab ──
     const [activeTab, setActiveTab] = useState('profile');
 
-    /* ── profile section ── */
+    // ── profile section ──
     const displayName = user?.user_metadata?.name || user?.email?.split('@')[0] || 'User';
     const [passwordForm, setPasswordForm] = useState({ current: '', next: '', confirm: '' });
     const [showPw, setShowPw] = useState({ current: false, next: false, confirm: false });
@@ -103,9 +108,10 @@ const SettingsPage = () => {
         if (!passwordForm.current) return showToast('error', 'Please enter your current password.');
         if (passwordForm.next.length < 8) return showToast('error', 'Password must be at least 8 characters.');
         if (passwordForm.next !== passwordForm.confirm) return showToast('error', 'Passwords do not match.');
+        if (changingPw) return;
         setChangingPw(true);
         try {
-            // 1. Verify current password
+            // 1. Verify current password by re-authenticating
             const { error: verifyError } = await supabase.auth.signInWithPassword({
                 email: user.email,
                 password: passwordForm.current,
@@ -115,16 +121,17 @@ const SettingsPage = () => {
             // 2. Update to new password
             const { error } = await supabase.auth.updateUser({ password: passwordForm.next });
             if (error) throw error;
-            
+
             showToast('success', 'Password updated successfully.');
             setPasswordForm({ current: '', next: '', confirm: '' });
         } catch (e) {
             showToast('error', e.message || 'Failed to update password.');
+        } finally {
+            setChangingPw(false);
         }
-        setChangingPw(false);
     };
 
-    /* ── security section ── */
+    // ── security section ──
     const lockEnabledKey = `cashly_lock_enabled_${user?.id}`;
     const lockPinKey = `cashly_lock_pin_${user?.id}`;
     const [lockEnabled, setLockEnabled] = useState(() =>
@@ -164,36 +171,58 @@ const SettingsPage = () => {
         showToast('success', 'PIN Lock disabled.');
     };
 
-    /* ── notifications section ── */
-    const notifKey = `cashly_notif_${user?.id}`;
-    const defaultNotif = { cashAlerts: true, weeklyReport: false, overduePings: true, systemUpdates: false };
-    const [notif, setNotif] = useState(() => {
-        try { return JSON.parse(localStorage.getItem(notifKey)) || defaultNotif; } catch { return defaultNotif; }
-    });
-
-    const toggleNotif = (key) => {
-        const updated = { ...notif, [key]: !notif[key] };
-        setNotif(updated);
-        localStorage.setItem(notifKey, JSON.stringify(updated));
-        showToast('info', `${key.replace(/([A-Z])/g, ' $1')} ${updated[key] ? 'enabled' : 'disabled'}.`);
+    // ── Sign Out ──
+    const handleLogout = async () => {
+        try {
+            await supabase.auth.signOut();
+            await logout();
+        } catch {}
+        navigate('/login');
     };
 
-    /* ── appearance section ── */
-    const appearKey = `cashly_appear_${user?.id}`;
-    const defaultAppear = { currency: 'INR', dateFormat: 'DD/MM/YYYY', compactNumbers: true, animationsEnabled: true };
-    const [appear, setAppear] = useState(() => {
-        try { return JSON.parse(localStorage.getItem(appearKey)) || defaultAppear; } catch { return defaultAppear; }
-    });
+    // ── Alerts / Notifications — persisted via useLocalStorage ──
+    const alertsKey = `cashly_alerts_${user?.id}`;
+    const [lowCashAlerts, setLowCashAlerts] = useLocalStorage(`${alertsKey}_lowCash`, true);
+    const [overduePings, setOverduePings] = useLocalStorage(`${alertsKey}_overdue`, true);
+    const [weeklySummary, setWeeklySummary] = useLocalStorage(`${alertsKey}_weekly`, false);
+    const [systemNotifications, setSystemNotifications] = useLocalStorage(`${alertsKey}_system`, false);
 
-    const updateAppear = (key, val) => {
-        const updated = { ...appear, [key]: val };
-        setAppear(updated);
-        localStorage.setItem(appearKey, JSON.stringify(updated));
-        showToast('success', 'Preference saved. Refreshing...');
-        setTimeout(() => window.location.reload(), 800);
-    };
+    const alertItems = [
+        {
+            label: 'Low Cash Alerts',
+            sub: 'Notify when cash runway drops below 30 days',
+            icon: Zap,
+            color: 'bg-amber-500',
+            value: lowCashAlerts,
+            setter: setLowCashAlerts,
+        },
+        {
+            label: 'Overdue Receivable Pings',
+            sub: 'Alert when an invoice passes its due date',
+            icon: Bell,
+            color: 'bg-red-500',
+            value: overduePings,
+            setter: setOverduePings,
+        },
+        {
+            label: 'Weekly Summary',
+            sub: 'Get a weekly digest of your financial activity',
+            icon: BarChart3,
+            color: 'bg-indigo-500',
+            value: weeklySummary,
+            setter: setWeeklySummary,
+        },
+        {
+            label: 'System Notifications',
+            sub: 'Feature updates and platform announcements',
+            icon: Info,
+            color: 'bg-slate-500',
+            value: systemNotifications,
+            setter: setSystemNotifications,
+        },
+    ];
 
-    /* ── data management ── */
+    // ── data management ──
     const [showWipe, setShowWipe] = useState(false);
     const [wiping, setWiping] = useState(false);
     const [wipeConfirmText, setWipeConfirmText] = useState('');
@@ -245,13 +274,7 @@ const SettingsPage = () => {
         setWiping(false);
     };
 
-    /* ── logout ── */
-    const handleLogout = async () => {
-        await logout();
-        navigate('/login');
-    };
-
-    /* ── tabs ── */
+    // ── tabs ──
     const tabs = [
         { id: 'profile', label: 'Profile', icon: User },
         { id: 'business', label: 'Business', icon: Building2 },
@@ -574,13 +597,8 @@ const SettingsPage = () => {
                                     <SectionHeader icon={Bell} label="Alert Preferences" color="text-blue-400" />
                                     <p className="text-xs text-white/30 mb-6 -mt-2">Preferences are saved locally on this device.</p>
 
-                                    {[
-                                        { key: 'cashAlerts', label: 'Low Cash Alerts', sub: 'Notify when cash runway drops below 30 days', icon: Zap, color: 'bg-amber-500' },
-                                        { key: 'overduePings', label: 'Overdue Receivable Pings', sub: 'Alert when an invoice passes its due date', icon: Bell, color: 'bg-red-500' },
-                                        { key: 'weeklyReport', label: 'Weekly Summary', sub: 'Get a weekly digest of your financial activity', icon: BarChart3, color: 'bg-indigo-500' },
-                                        { key: 'systemUpdates', label: 'System Notifications', sub: 'Feature updates and platform announcements', icon: Info, color: 'bg-slate-500' },
-                                    ].map(({ key, label, sub, icon: Icon, color }) => (
-                                        <div key={key} className="flex items-center justify-between py-4 border-b border-white/5 last:border-0">
+                                    {alertItems.map(({ label, sub, icon: Icon, color, value, setter }) => (
+                                        <div key={label} className="flex items-center justify-between py-4 border-b border-white/5 last:border-0">
                                             <div className="flex items-center gap-4">
                                                 <div className={`p-2 rounded-xl ${color}/10 ${color.replace('bg-', 'text-')}`}>
                                                     <Icon className="w-4 h-4" />
@@ -590,7 +608,7 @@ const SettingsPage = () => {
                                                     <p className="text-xs text-white/30 mt-0.5">{sub}</p>
                                                 </div>
                                             </div>
-                                            <Toggle checked={notif[key]} onChange={() => toggleNotif(key)} label={label} />
+                                            <Toggle checked={value} onChange={() => setter(!value)} label={label} />
                                         </div>
                                     ))}
                                 </Card>
@@ -605,11 +623,11 @@ const SettingsPage = () => {
 
                                         <Row label="Currency" sublabel="Primary currency for display">
                                             <div className="flex gap-2">
-                                                {['INR'].map(cur => (
+                                                {['INR', 'USD', 'EUR'].map(cur => (
                                                     <button
                                                         key={cur}
-                                                        onClick={() => updateAppear('currency', cur)}
-                                                        className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-widest transition-all ${appear.currency === cur
+                                                        onClick={() => updateDisplay('currency', cur)}
+                                                        className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-widest transition-all ${display.currency === cur
                                                             ? 'bg-indigo-600 text-white shadow-md shadow-indigo-900/30'
                                                             : 'bg-white/5 text-white/40 hover:bg-white/10'
                                                             }`}
@@ -623,8 +641,8 @@ const SettingsPage = () => {
                                                 {['DD/MM/YYYY', 'MM/DD/YYYY', 'YYYY-MM-DD'].map(fmt => (
                                                     <button
                                                         key={fmt}
-                                                        onClick={() => updateAppear('dateFormat', fmt)}
-                                                        className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold tracking-wider transition-all ${appear.dateFormat === fmt
+                                                        onClick={() => updateDisplay('dateFormat', fmt)}
+                                                        className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold tracking-wider transition-all ${display.dateFormat === fmt
                                                             ? 'bg-indigo-600 text-white'
                                                             : 'bg-white/5 text-white/40 hover:bg-white/10'
                                                             }`}
@@ -634,11 +652,11 @@ const SettingsPage = () => {
                                         </Row>
 
                                         <Row label="Compact Numbers" sublabel="Show ₹1.2k instead of ₹1,200">
-                                            <Toggle checked={appear.compactNumbers} onChange={v => updateAppear('compactNumbers', v)} label="Compact Numbers" />
+                                            <Toggle checked={display.compactNumbers} onChange={v => updateDisplay('compactNumbers', v)} label="Compact Numbers" />
                                         </Row>
 
                                         <Row label="Animations" sublabel="Enable page and widget animations">
-                                            <Toggle checked={appear.animationsEnabled} onChange={v => updateAppear('animationsEnabled', v)} label="Animations" />
+                                            <Toggle checked={display.animations} onChange={v => updateDisplay('animations', v)} label="Animations" />
                                         </Row>
                                     </Card>
 
@@ -652,12 +670,12 @@ const SettingsPage = () => {
                                             ].map(theme => (
                                                 <button
                                                     key={theme.id}
-                                                    onClick={() => updateAppear('theme', theme.id)}
-                                                    className={`p-4 rounded-2xl border transition-all ${appear.theme === theme.id ? 'border-indigo-500/50 bg-indigo-600/10' : 'border-white/10 bg-white/[0.02] hover:bg-white/5'}`}
+                                                    onClick={() => updateDisplay('theme', theme.id)}
+                                                    className={`p-4 rounded-2xl border transition-all ${display.theme === theme.id ? 'border-indigo-500/50 bg-indigo-600/10' : 'border-white/10 bg-white/[0.02] hover:bg-white/5'}`}
                                                 >
                                                     <div className={`w-full h-8 rounded-xl ${theme.preview} border border-white/10 mb-2`} />
                                                     <p className="text-xs font-bold text-white/60">{theme.label}</p>
-                                                    {appear.theme === theme.id && (
+                                                    {display.theme === theme.id && (
                                                         <div className="flex items-center gap-1 mt-1">
                                                             <CheckCircle2 className="w-3 h-3 text-indigo-400" />
                                                             <span className="text-[9px] text-indigo-400 font-bold uppercase tracking-widest">Active</span>

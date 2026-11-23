@@ -1,8 +1,9 @@
 import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './contexts/AuthContext';
-import { useContext, lazy, Suspense, useEffect } from 'react';
+import { DisplayProvider } from './contexts/DisplayContext';
+import { FinancialDataProvider } from './contexts/FinancialDataContext';
+import { useContext, lazy, Suspense } from 'react';
 import { MotionConfig } from 'framer-motion';
-import { getAppearance } from './lib/formatters';
 
 // Helper to handle chunk load errors (happens when old version is cached)
 const safeLazy = (importFn) => lazy(async () => {
@@ -34,6 +35,7 @@ const ResetPasswordPage = safeLazy(() => import('./pages/ResetPasswordPage'));
 const ReconciliationPage = safeLazy(() => import('./pages/ReconciliationPage'));
 
 import AuthContext from './contexts/AuthContext';
+import DisplayContext from './contexts/DisplayContext';
 import AppLock from './components/AppLock';
 
 const LoadingScreen = () => (
@@ -113,25 +115,20 @@ const BusinessRoute = ({ children }) => {
   );
 };
 
-function App() {
-  const { theme, animationsEnabled } = getAppearance();
-
-  useEffect(() => {
-    if (theme === 'dark') document.body.style.backgroundColor = '#02040a';
-    if (theme === 'midnight') document.body.style.backgroundColor = '#000008';
-    if (theme === 'slate') document.body.style.backgroundColor = '#0f172a';
-  }, [theme]);
+// Inner component that consumes both AuthContext and DisplayContext after providers mount
+function AppInner() {
+  const { display } = useContext(DisplayContext);
+  const animationsEnabled = display?.animations ?? true;
 
   return (
     <MotionConfig reducedMotion={animationsEnabled ? "never" : "always"}>
-      <AuthProvider>
-        <Router>
-          <Suspense fallback={<LoadingScreen />}>
-            <Routes>
-              <Route path="/" element={<LandingPage />} />
-              <Route path="/login" element={<LoginPage />} />
-              <Route path="/register" element={<RegisterPage />} />
-              <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Router>
+        <Suspense fallback={<LoadingScreen />}>
+          <Routes>
+            <Route path="/" element={<LandingPage />} />
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/register" element={<RegisterPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
             <Route path="/reset-password" element={<ResetPasswordPage />} />
 
             {/* Business Setup - protected but doesn't require business */}
@@ -206,8 +203,29 @@ function App() {
           </Routes>
         </Suspense>
       </Router>
-    </AuthProvider>
     </MotionConfig>
+  );
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <DisplayProviderWithUser>
+        <FinancialDataProvider>
+          <AppInner />
+        </FinancialDataProvider>
+      </DisplayProviderWithUser>
+    </AuthProvider>
+  );
+}
+
+// Bridges AuthContext userId into DisplayProvider so it reads the right localStorage key
+function DisplayProviderWithUser({ children }) {
+  const { user } = useContext(AuthContext);
+  return (
+    <DisplayProvider userId={user?.id}>
+      {children}
+    </DisplayProvider>
   );
 }
 

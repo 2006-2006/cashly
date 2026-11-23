@@ -21,7 +21,7 @@ export const getAppearance = () => {
                     currency: data.currency || 'INR',
                     dateFormat: data.dateFormat || 'DD/MM/YYYY',
                     compactNumbers: data.compactNumbers ?? false,
-                    animationsEnabled: data.animationsEnabled ?? true,
+                    animationsEnabled: data.animations ?? data.animationsEnabled ?? true,
                     theme: data.theme || 'dark'
                 };
             }

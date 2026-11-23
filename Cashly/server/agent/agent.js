@@ -431,9 +431,10 @@ class CashlyAgent {
             .join('\n\n');
 
         // Inject Visual Context from Frontend (Match what user sees)
+        const groundingContext = this.context.systemContext || '';
         const visualContext = `
 === VISUAL DASHBOARD STATE (PRIORITY) ===
-• Current Cash: ₹${this.context.currentCash?.toLocaleString() || 'Unknown'}
+${groundingContext ? `=== SSOT GROUNDING (CANONICAL METRICS) ===\n${groundingContext}\n` : ''}• Current Cash: ₹${this.context.currentCash?.toLocaleString() || 'Unknown'}
 • Dashboard Metrics: ${JSON.stringify(this.context.metrics || {}, null, 2)}
 • Business Health: ${JSON.stringify(this.context.situation || {}, null, 2)}
 • Live Forecast State: ${this.context.forecastData ? 'Available and plotted in browser' : 'Not calculated'}
@@ -456,6 +457,7 @@ class CashlyAgent {
 2. **ONLY use data provided** — Never invent or estimate figures. If data is missing, say so explicitly.
 3. **MATCH THE DASHBOARD** — If the VISUAL DASHBOARD STATE contradicts tool results, use the dashboard figures (that's what the user sees).
 4. **NO FILLER** — Do not say "Great question!", "Of course!", "I'm Cashly", or any intro phrase.
+5. **GROUNDING** — You must quote financial metrics strictly from the injected System Context. Never invent, estimate, or recalculate totals independently.
 
 USER'S EXACT QUESTION: "${query}"
 

@@ -15,6 +15,7 @@ import {
 import { motion as Motion, AnimatePresence } from 'framer-motion';
 import api from '../api/axios';
 import AuthContext from '../contexts/AuthContext';
+import { useFinancialData } from '../contexts/FinancialDataContext';
 import Sidebar from '../components/Sidebar';
 import { cn } from '@/lib/utils';
 import confetti from 'canvas-confetti';
@@ -97,6 +98,7 @@ const FileUploadCard = ({ title, file, onChange, status, errorMessage, icon: _Ic
 const UploadDataPage = () => {
 
     const { selectedBusiness, fetchBusinesses, user } = useContext(AuthContext);
+    const { refreshFinancialData } = useFinancialData();
     const [salesFile, setSalesFile] = useState(null);
     const [expensesFile, setExpensesFile] = useState(null);
     const [inventoryFile, setInventoryFile] = useState(null);
@@ -179,6 +181,9 @@ const UploadDataPage = () => {
             await fetchBusinesses(user.id);
         }
 
+        // Refresh global financial data so Dashboard + AI Analysis update immediately
+        await refreshFinancialData();
+
         setUploading(false);
     };
 
@@ -246,6 +251,7 @@ const UploadDataPage = () => {
                                         const businessId = selectedBusiness?._id || selectedBusiness?.id;
                                         await api.post('/upload/inject-sample', { businessId });
                                         if (user?.id) await fetchBusinesses(user.id);
+                                        await refreshFinancialData();
                                         triggerConfetti();
                                         showNotification('success', 'Realistic sample data synchronized!');
                                     } catch (e) {

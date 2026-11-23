@@ -12,6 +12,7 @@ import api from '../api/axios';
 import { supabase } from '../lib/supabase';
 import { calculateForecast } from '../lib/forecast';
 import AuthContext from '../contexts/AuthContext';
+import { useFinancialData } from '../contexts/FinancialDataContext';
 import { formatCurrency, formatDate } from '../lib/formatters';
 import Sidebar from '../components/Sidebar';
 import { NotificationPanel } from '../components/ui/notification-panel';
@@ -126,11 +127,17 @@ const itemVariants = {
 
 const Dashboard = () => {
     const { logout, user, selectedBusiness } = useContext(AuthContext);
+    const {
+        rawSales, rawExpenses, rawReceivables,
+        metrics: financialMetrics,
+        dateRange, setDateRange,
+        isLoading: financialLoading,
+        aiGroundingPayload,
+    } = useFinancialData();
     const navigate = useNavigate();
     
     // UI State
     const [isLoading, setIsLoading] = useState(true);
-    const [dateFilter, setDateFilter] = useState('30days'); // '30days', 'month', 'all'
     const [showNotifications, setShowNotifications] = useState(false);
 
     // Inline AI Chat State
@@ -139,32 +146,17 @@ const Dashboard = () => {
     const [aiMessages, setAiMessages] = useState([]);
     const [aiLoading, setAiLoading] = useState(false);
 
-    // Data States
+    // Data States (Dashboard-specific, NOT metrics)
     const [forecast, setForecast] = useState(null);
     const [anomalies, setAnomalies] = useState([]);
     
-    const [rawSales, setRawSales] = useState([]);
-    const [rawExpenses, setRawExpenses] = useState([]);
-    
-    const [filteredData, setFilteredData] = useState({
-        revenue: 0,
-        expenses: 0,
-        netProfit: 0,
-        profitMargin: 0,
-        salesTrend: 0,
-        expensesTrend: 0,
+    // Chart data derived from context's filtered arrays
+    const [chartData, setChartData] = useState({
         revenueVsExpensesChart: [],
         revenueSparkline: [],
         expensesSparkline: [],
         profitSparkline: [],
         recentTransactions: []
-    });
-
-    const [metrics, setMetrics] = useState({
-        burnRate: 0,
-        salesCount: 0,
-        expensesCount: 0,
-        hasRealData: false
     });
 
     const [monthlyGoal, setMonthlyGoal] = useState({ target: 0, current: 0, percentage: 0 });
@@ -178,8 +170,6 @@ const Dashboard = () => {
     };
 
     // ─── Smart chart bucket aggregation ─────────────────────────────────────────
-    // Groups daily data into weekly or monthly buckets depending on span size.
-    // This ensures the chart always renders readable data regardless of date range.
     const aggregateBuckets = useCallback((dailyMap) => {
         const entries = Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
         if (entries.length === 0) return [];
@@ -187,17 +177,14 @@ const Dashboard = () => {
         const spanDays = entries.length;
 
         if (spanDays <= 60) {
-            // Daily — show raw days, label as MM-DD
             return entries.map(d => ({
                 ...d,
-                label: d.date.slice(5) // "MM-DD"
+                label: d.date.slice(5)
             }));
         } else if (spanDays <= 365) {
-            // Weekly buckets
             const weeks = {};
             entries.forEach(d => {
                 const dt = new Date(d.date);
-                // Start of that ISO week (Monday)
                 const day = dt.getDay();
                 const diff = (day === 0 ? -6 : 1) - day;
                 const weekStart = new Date(dt);
@@ -210,10 +197,9 @@ const Dashboard = () => {
             });
             return Object.values(weeks).sort((a, b) => a.date.localeCompare(b.date));
         } else {
-            // Monthly buckets
             const months = {};
             entries.forEach(d => {
-                const key = d.date.slice(0, 7); // "YYYY-MM"
+                const key = d.date.slice(0, 7);
                 if (!months[key]) {
                     const [y, m] = key.split('-');
                     const label = formatDate(new Date(+y, +m - 1, 1));
@@ -227,266 +213,168 @@ const Dashboard = () => {
         }
     }, []);
 
-    // Calculate derived metrics based on date filter
-    const calculateFilteredMetrics = useCallback((sales, expenses, filter) => {
-        const now = new Date();
+    // ─── Derive charts, forecast, notifications from SSOT context data ──────────
+    useEffect(() => {
+        if (financialLoading || !selectedBusiness) return;
 
-        // ── 1. Determine filter boundaries ──────────────────────────────────────
-        // For 'all', we look at the earliest date in the dataset
-        let startDate;
-        let endDate = now;
+        const sales = rawSales;
+        const expenses = rawExpenses;
+        const receivables = rawReceivables;
+        const hasRealData = financialMetrics.hasRealData;
 
-        if (filter === '30days') {
-            startDate = new Date();
-            startDate.setDate(now.getDate() - 30);
-        } else if (filter === 'month') {
-            startDate = new Date(now.getFullYear(), now.getMonth(), 1);
-        } else {
-            // 'all' — find actual earliest date in data
-            const allDates = [
-                ...sales.map(s => new Date(s.date)),
-                ...expenses.map(e => new Date(e.date))
-            ].filter(d => !isNaN(d));
-            startDate = allDates.length > 0 ? new Date(Math.min(...allDates)) : new Date(0);
-        }
+        if (hasRealData) {
+            // ── Build chart data from context's filtered arrays ──────────
+            const { startDate, endDate, filteredSales, filteredExpenses } = financialMetrics;
+            const chartStartDate = new Date(startDate);
+            chartStartDate.setHours(0, 0, 0, 0);
+            const chartEndDate = new Date(endDate);
+            chartEndDate.setHours(23, 59, 59, 999);
 
-        // ── 2. Filter records ────────────────────────────────────────────────────
-        const currentSales = sales.filter(s => new Date(s.date) >= startDate && new Date(s.date) <= endDate);
-        const currentExpenses = expenses.filter(e => new Date(e.date) >= startDate && new Date(e.date) <= endDate);
+            const msPerDay = 1000 * 60 * 60 * 24;
+            const spanDays = Math.ceil((chartEndDate - chartStartDate) / msPerDay) + 1;
+            const maxDailyBuckets = 730;
+            const bucketCount = Math.min(spanDays, maxDailyBuckets);
 
-        // ── 3. Calculate totals ──────────────────────────────────────────────────
-        const totalRev = currentSales.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
-        const totalExp = currentExpenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
-        const net = totalRev - totalExp;
-        const margin = totalRev > 0 ? ((net / totalRev) * 100).toFixed(1) : 0;
-
-        // ── 4. Trend vs previous equivalent period ───────────────────────────────
-        let prevStartDate = new Date(startDate);
-        if (filter === '30days') {
-            prevStartDate.setDate(prevStartDate.getDate() - 30);
-        } else if (filter === 'month') {
-            prevStartDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-        } else {
-            prevStartDate = new Date(0); // no previous for all-time
-        }
-
-        const prevSalesList = sales.filter(s => { const d = new Date(s.date); return d >= prevStartDate && d < startDate; });
-        const prevExpList = expenses.filter(e => { const d = new Date(e.date); return d >= prevStartDate && d < startDate; });
-        const prevRev = prevSalesList.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
-        const prevExpTotal = prevExpList.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
-        const revTrend = prevRev > 0 ? ((totalRev - prevRev) / prevRev) * 100 : 0;
-        const expTrend = prevExpTotal > 0 ? ((totalExp - prevExpTotal) / prevExpTotal) * 100 : 0;
-
-        // ── 5. Build data-driven chart buckets ───────────────────────────────────
-        // Determine the actual date span of the filtered data so chart buckets
-        // perfectly cover the data — not an arbitrary today-relative window.
-        const chartStartDate = new Date(startDate);
-        chartStartDate.setHours(0, 0, 0, 0);
-        const chartEndDate = new Date(endDate);
-        chartEndDate.setHours(23, 59, 59, 999);
-
-        const msPerDay = 1000 * 60 * 60 * 24;
-        const spanDays = Math.ceil((chartEndDate - chartStartDate) / msPerDay) + 1;
-        // Cap at 730 daily buckets to prevent huge objects; 'all' will use aggregation anyway
-        const maxDailyBuckets = 730;
-        const bucketCount = Math.min(spanDays, maxDailyBuckets);
-
-        const dailyData = {};
-        for (let i = 0; i < bucketCount; i++) {
-            const d = new Date(chartStartDate);
-            d.setDate(d.getDate() + i);
-            const dateKey = d.toISOString().split('T')[0];
-            dailyData[dateKey] = { date: dateKey, revenue: 0, expenses: 0, net: 0 };
-        }
-
-        currentSales.forEach(s => {
-            const dateKey = new Date(s.date).toISOString().split('T')[0];
-            if (dailyData[dateKey]) dailyData[dateKey].revenue += (Number(s.amount) || 0);
-        });
-        currentExpenses.forEach(e => {
-            const dateKey = new Date(e.date).toISOString().split('T')[0];
-            if (dailyData[dateKey]) dailyData[dateKey].expenses += (Number(e.amount) || 0);
-        });
-        Object.values(dailyData).forEach(d => { d.net = d.revenue - d.expenses; });
-
-        // Apply smart aggregation based on span size
-        const chartArray = aggregateBuckets(dailyData);
-
-        // ── 6. Recent Transactions ───────────────────────────────────────────────
-        const combinedTxns = [
-            ...currentSales.map(s => ({ ...s, type: 'income' })),
-            ...currentExpenses.map(e => ({ ...e, type: 'expense' }))
-        ].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5);
-
-        setFilteredData({
-            revenue: totalRev,
-            expenses: totalExp,
-            netProfit: net,
-            profitMargin: margin,
-            salesTrend: Math.round(revTrend),
-            expensesTrend: Math.round(expTrend),
-            revenueVsExpensesChart: chartArray,
-            revenueSparkline: chartArray.map(d => ({ value: d.revenue })),
-            expensesSparkline: chartArray.map(d => ({ value: d.expenses })),
-            profitSparkline: chartArray.map(d => ({ value: d.net })),
-            recentTransactions: combinedTxns
-        });
-
-    }, [aggregateBuckets]);
-
-    const fetchDashboardData = useCallback(async () => {
-        if (!selectedBusiness) return;
-        setIsLoading(true);
-        try {
-            // Fetch real data from DB
-            const [salesRes, expRes, recRes] = await Promise.all([
-                supabase.from('sales').select('*').eq('business_id', selectedBusiness.id).order('date', { ascending: false }),
-                supabase.from('expenses').select('*').eq('business_id', selectedBusiness.id).order('date', { ascending: false }),
-                supabase.from('receivables').select('*').eq('business_id', selectedBusiness.id)
-            ]);
-
-            const sales = salesRes.data || [];
-            const expenses = expRes.data || [];
-            const receivables = recRes.data || [];
-            const hasRealData = sales.length > 0 || expenses.length > 0;
-
-            setRawSales(sales);
-            setRawExpenses(expenses);
-
-            if (hasRealData) {
-                const thirtyDaysAgo = new Date();
-                thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-                const recentExp = expenses.filter(e => new Date(e.date) >= thirtyDaysAgo);
-                const actualBurnRate = recentExp.reduce((sum, e) => sum + (Number(e.amount) || 0), 0) / 30;
-
-                setMetrics({
-                    burnRate: actualBurnRate,
-                    salesCount: sales.length,
-                    expensesCount: expenses.length,
-                    hasRealData: true
-                });
-
-                const avgExpense = expenses.length > 0 ? expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0) / expenses.length : 0;
-
-                const now = new Date();
-                const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-                const startOfPrevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-                
-                const currentMonthSales = sales.filter(s => new Date(s.date) >= startOfMonth).reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
-                const prevMonthSales = sales.filter(s => new Date(s.date) >= startOfPrevMonth && new Date(s.date) < startOfMonth).reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
-                
-                const dynamicTarget = prevMonthSales > 0 ? prevMonthSales * 1.1 : (currentMonthSales > 0 ? currentMonthSales * 1.2 : 0);
-                
-                setMonthlyGoal({
-                    target: dynamicTarget,
-                    current: currentMonthSales,
-                    percentage: dynamicTarget > 0 ? Math.min(100, Math.round((currentMonthSales / dynamicTarget) * 100)) : 0
-                });
-
-                calculateFilteredMetrics(sales, expenses, dateFilter);
-
-                // Use only the most recent 90 days of data for the forecast model.
-                // Using all-time data spreads the daily average over too many days,
-                // producing near-zero projections when data is old.
-                const ninetyDaysAgo = new Date();
-                ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-                const recentSales = sales.filter(s => new Date(s.date) >= ninetyDaysAgo);
-                const recentExpenses = expenses.filter(e => new Date(e.date) >= ninetyDaysAgo);
-
-                // If no recent data (all data is older), fall back to all data
-                // to still produce a meaningful forecast rather than showing nothing.
-                const forecastSales = recentSales.length > 0 ? recentSales : sales;
-                const forecastExpenses = recentExpenses.length > 0 ? recentExpenses : expenses;
-
-                const forecastCurrentCash = forecastSales.reduce((a, b) => a + (Number(b.amount) || 0), 0)
-                    - forecastExpenses.reduce((a, b) => a + (Number(b.amount) || 0), 0);
-
-                const forecastResult = calculateForecast(
-                    forecastCurrentCash,
-                    forecastSales,
-                    forecastExpenses,
-                    [], [], [], {}
-                );
-                setForecast(forecastResult);
-
-                // --- Generate Notifications based on Preferences ---
-                let notifs = { cashAlerts: true, weeklyReport: false, overduePings: true, systemUpdates: false };
-                try {
-                    const stored = JSON.parse(localStorage.getItem(`cashly_notif_${user?.id}`));
-                    if (stored) notifs = { ...notifs, ...stored };
-                } catch {}
-
-                const newAnomalies = [];
-
-                if (notifs.overduePings && receivables.length > 0) {
-                    const today = new Date();
-                    const overdue = receivables.filter(r => r.status !== 'Paid' && new Date(r.due_date) < today);
-                    if (overdue.length > 0) {
-                        newAnomalies.push({
-                            id: 'overdue', type: 'expense', title: 'Overdue Receivables',
-                            message: `${overdue.length} invoice(s) have passed their due date.`,
-                            amount: overdue.reduce((sum, r) => sum + (Number(r.amount) || 0), 0),
-                            severity: 'danger', icon: '💸',
-                            solution: 'Follow up with these clients immediately to improve cash flow.'
-                        });
-                    }
-                }
-
-                if (notifs.systemUpdates && expenses.length > 0) {
-                    const avgExpense = expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0) / expenses.length;
-                    const largeExpenses = expenses.filter(e => e.amount > avgExpense * 2.5);
-                    if (largeExpenses.length > 0) {
-                        newAnomalies.push({ 
-                            id: 'unusual', type: 'expense', title: 'Unusual Large Expenses', 
-                            message: `${largeExpenses.length} expense(s) significantly above average detected.`,
-                            amount: largeExpenses.reduce((s, e) => s + e.amount, 0),
-                            severity: 'warning', icon: '📉',
-                            solution: 'Review these transactions to ensure they were authorized.'
-                        });
-                    }
-                }
-
-                if (notifs.cashAlerts && forecastResult?.runwayDays < 30) {
-                    newAnomalies.push({
-                        id: 'low-cash', type: 'expense', title: 'Low Cash Runway',
-                        message: `Your cash runway is projected to run out in ${Math.max(0, Math.round(forecastResult.runwayDays))} days.`,
-                        severity: 'danger', icon: '📉',
-                        solution: 'Reduce expenses or accelerate receivables to extend your runway.'
-                    });
-                }
-
-                if (notifs.weeklyReport) {
-                    const sevenDaysAgo = new Date();
-                    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-                    const weeklySales = sales.filter(s => new Date(s.date) >= sevenDaysAgo).reduce((s, x) => s + (Number(x.amount) || 0), 0);
-                    const weeklyExp = expenses.filter(e => new Date(e.date) >= sevenDaysAgo).reduce((s, x) => s + (Number(x.amount) || 0), 0);
-                    const weeklyNet = weeklySales - weeklyExp;
-                    newAnomalies.push({
-                        id: 'weekly', type: 'income', title: 'Weekly Summary',
-                        message: `Your net profit for the last 7 days is ${weeklyNet >= 0 ? 'positive' : 'negative'}.`,
-                        amount: Math.abs(weeklyNet),
-                        severity: weeklyNet >= 0 ? 'success' : 'warning', icon: '📊',
-                        solution: weeklyNet >= 0 ? 'Keep up the good work!' : 'Monitor expenses closely this week.'
-                    });
-                }
-
-                setAnomalies(newAnomalies);
-            } else {
-                setMetrics(prev => ({ ...prev, hasRealData: false }));
+            const dailyData = {};
+            for (let i = 0; i < bucketCount; i++) {
+                const d = new Date(chartStartDate);
+                d.setDate(d.getDate() + i);
+                const dateKey = d.toISOString().split('T')[0];
+                dailyData[dateKey] = { date: dateKey, revenue: 0, expenses: 0, net: 0 };
             }
-        } catch (error) {
-            console.error("Dashboard Data Load Error:", error);
-        } finally {
-            setIsLoading(false);
-        }
-    }, [selectedBusiness, dateFilter, calculateFilteredMetrics]);
 
-    useEffect(() => { fetchDashboardData(); }, [fetchDashboardData]);
+            filteredSales.forEach(s => {
+                const dateKey = new Date(s.date).toISOString().split('T')[0];
+                if (dailyData[dateKey]) dailyData[dateKey].revenue += (Number(s.amount) || 0);
+            });
+            filteredExpenses.forEach(e => {
+                const dateKey = new Date(e.date).toISOString().split('T')[0];
+                if (dailyData[dateKey]) dailyData[dateKey].expenses += (Number(e.amount) || 0);
+            });
+            Object.values(dailyData).forEach(d => { d.net = d.revenue - d.expenses; });
+
+            const chartArray = aggregateBuckets(dailyData);
+
+            const combinedTxns = [
+                ...filteredSales.map(s => ({ ...s, type: 'income' })),
+                ...filteredExpenses.map(e => ({ ...e, type: 'expense' }))
+            ].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 5);
+
+            setChartData({
+                revenueVsExpensesChart: chartArray,
+                revenueSparkline: chartArray.map(d => ({ value: d.revenue })),
+                expensesSparkline: chartArray.map(d => ({ value: d.expenses })),
+                profitSparkline: chartArray.map(d => ({ value: d.net })),
+                recentTransactions: combinedTxns
+            });
+
+            // ── Monthly Goal ────────────────────────────────────────────
+            const now = new Date();
+            const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+            const startOfPrevMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+            const currentMonthSales = sales.filter(s => new Date(s.date) >= startOfMonth).reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+            const prevMonthSales = sales.filter(s => new Date(s.date) >= startOfPrevMonth && new Date(s.date) < startOfMonth).reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+            const dynamicTarget = prevMonthSales > 0 ? prevMonthSales * 1.1 : (currentMonthSales > 0 ? currentMonthSales * 1.2 : 0);
+            setMonthlyGoal({
+                target: dynamicTarget,
+                current: currentMonthSales,
+                percentage: dynamicTarget > 0 ? Math.min(100, Math.round((currentMonthSales / dynamicTarget) * 100)) : 0
+            });
+
+            // ── Forecast ────────────────────────────────────────────────
+            const ninetyDaysAgo = new Date();
+            ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+            const recentSales = sales.filter(s => new Date(s.date) >= ninetyDaysAgo);
+            const recentExpenses = expenses.filter(e => new Date(e.date) >= ninetyDaysAgo);
+            const forecastSales = recentSales.length > 0 ? recentSales : sales;
+            const forecastExpenses = recentExpenses.length > 0 ? recentExpenses : expenses;
+            const forecastCurrentCash = forecastSales.reduce((a, b) => a + (Number(b.amount) || 0), 0)
+                - forecastExpenses.reduce((a, b) => a + (Number(b.amount) || 0), 0);
+
+            const forecastResult = calculateForecast(
+                forecastCurrentCash,
+                forecastSales,
+                forecastExpenses,
+                [], [], [], {}
+            );
+            setForecast(forecastResult);
+
+            // ── Notifications ───────────────────────────────────────────
+            const alertsKey = `cashly_alerts_${user?.id}`;
+            const readAlert = (suffix, fallback) => {
+                try {
+                    const raw = localStorage.getItem(`${alertsKey}_${suffix}`);
+                    return raw !== null ? JSON.parse(raw) : fallback;
+                } catch { return fallback; }
+            };
+            const notifs = {
+                cashAlerts: readAlert('lowCash', true),
+                overduePings: readAlert('overdue', true),
+                weeklyReport: readAlert('weekly', false),
+                systemUpdates: readAlert('system', false),
+            };
+
+            const newAnomalies = [];
+
+            if (notifs.overduePings && receivables.length > 0) {
+                const today = new Date();
+                const overdue = receivables.filter(r => r.status !== 'Paid' && new Date(r.due_date) < today);
+                if (overdue.length > 0) {
+                    newAnomalies.push({
+                        id: 'overdue', type: 'expense', title: 'Overdue Receivables',
+                        message: `${overdue.length} invoice(s) have passed their due date.`,
+                        amount: overdue.reduce((sum, r) => sum + (Number(r.amount) || 0), 0),
+                        severity: 'danger', icon: '💸',
+                        solution: 'Follow up with these clients immediately to improve cash flow.'
+                    });
+                }
+            }
+
+            if (notifs.systemUpdates && expenses.length > 0) {
+                const avgExpense = expenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0) / expenses.length;
+                const largeExpenses = expenses.filter(e => e.amount > avgExpense * 2.5);
+                if (largeExpenses.length > 0) {
+                    newAnomalies.push({ 
+                        id: 'unusual', type: 'expense', title: 'Unusual Large Expenses', 
+                        message: `${largeExpenses.length} expense(s) significantly above average detected.`,
+                        amount: largeExpenses.reduce((s, e) => s + e.amount, 0),
+                        severity: 'warning', icon: '📉',
+                        solution: 'Review these transactions to ensure they were authorized.'
+                    });
+                }
+            }
+
+            if (notifs.cashAlerts && forecastResult?.runwayDays < 30) {
+                newAnomalies.push({
+                    id: 'low-cash', type: 'expense', title: 'Low Cash Runway',
+                    message: `Your cash runway is projected to run out in ${Math.max(0, Math.round(forecastResult.runwayDays))} days.`,
+                    severity: 'danger', icon: '📉',
+                    solution: 'Reduce expenses or accelerate receivables to extend your runway.'
+                });
+            }
+
+            if (notifs.weeklyReport) {
+                const sevenDaysAgo = new Date();
+                sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+                const weeklySales = sales.filter(s => new Date(s.date) >= sevenDaysAgo).reduce((s, x) => s + (Number(x.amount) || 0), 0);
+                const weeklyExp = expenses.filter(e => new Date(e.date) >= sevenDaysAgo).reduce((s, x) => s + (Number(x.amount) || 0), 0);
+                const weeklyNet = weeklySales - weeklyExp;
+                newAnomalies.push({
+                    id: 'weekly', type: 'income', title: 'Weekly Summary',
+                    message: `Your net profit for the last 7 days is ${weeklyNet >= 0 ? 'positive' : 'negative'}.`,
+                    amount: Math.abs(weeklyNet),
+                    severity: weeklyNet >= 0 ? 'success' : 'warning', icon: '📊',
+                    solution: weeklyNet >= 0 ? 'Keep up the good work!' : 'Monitor expenses closely this week.'
+                });
+            }
+
+            setAnomalies(newAnomalies);
+        }
+        setIsLoading(false);
+    }, [financialLoading, financialMetrics, rawSales, rawExpenses, rawReceivables, selectedBusiness, user?.id, aggregateBuckets]);
 
     const handleFilterChange = (e) => {
-        const newFilter = e.target.value;
-        setDateFilter(newFilter);
-        calculateFilteredMetrics(rawSales, rawExpenses, newFilter);
+        setDateRange(e.target.value);
     };
 
     // ─── Inline Dashboard AI Chat ────────────────────────────────────────────────
@@ -506,22 +394,21 @@ const Dashboard = () => {
 
         try {
             const businessId = selectedBusiness?._id || selectedBusiness?.id;
-            const currentCash = rawSales.reduce((s, x) => s + (Number(x.amount) || 0), 0)
-                              - rawExpenses.reduce((s, x) => s + (Number(x.amount) || 0), 0);
 
             const res = await api.post('/ai/ask', {
                 query: q,
                 businessId,
-                currentCash,
+                currentCash: financialMetrics.cashBalance,
+                systemContext: aiGroundingPayload,
                 metrics: {
-                    burnRate: metrics.burnRate,
-                    salesCount: metrics.salesCount,
-                    expensesCount: metrics.expensesCount,
-                    totalRevenue: filteredData.revenue,
-                    totalExpenses: filteredData.expenses,
-                    netProfit: filteredData.netProfit,
-                    profitMargin: filteredData.profitMargin,
-                    runwayDays: forecast?.runwayDays,
+                    burnRate: financialMetrics.dailyBurn,
+                    salesCount: financialMetrics.salesCount,
+                    expensesCount: financialMetrics.expensesCount,
+                    totalRevenue: financialMetrics.totalRevenue,
+                    totalExpenses: financialMetrics.totalExpenses,
+                    netProfit: financialMetrics.netProfit,
+                    profitMargin: financialMetrics.profitMargin,
+                    runwayDays: financialMetrics.runwayDays,
                     anomalyCount: anomalies.length,
                 }
             });
@@ -554,7 +441,7 @@ const Dashboard = () => {
     ];
 
     const handleExport = async () => {
-        if (!metrics.hasRealData) return;
+        if (!financialMetrics.hasRealData) return;
         
         // Helper to strip weird unicode spaces from currency for jsPDF
         const pdfFormatCurrency = (val) => {
@@ -601,10 +488,10 @@ const Dashboard = () => {
             startY: currentY + 4,
             head: [['Indicator', 'Status', 'Value']],
             body: [
-                ['Total Revenue', 'Healthy', pdfFormatCurrency(filteredData.revenue)],
-                ['Total Expenses', 'Monitored', pdfFormatCurrency(filteredData.expenses)],
-                ['Net Profit', filteredData.netProfit >= 0 ? 'Positive' : 'Negative', pdfFormatCurrency(filteredData.netProfit)],
-                ['Profit Margin', filteredData.profitMargin > 0 ? 'Healthy' : 'Critical', `${filteredData.profitMargin}%`]
+                ['Total Revenue', 'Healthy', pdfFormatCurrency(financialMetrics.totalRevenue)],
+                ['Total Expenses', 'Monitored', pdfFormatCurrency(financialMetrics.totalExpenses)],
+                ['Net Profit', financialMetrics.netProfit >= 0 ? 'Positive' : 'Negative', pdfFormatCurrency(financialMetrics.netProfit)],
+                ['Profit Margin', financialMetrics.profitMargin > 0 ? 'Healthy' : 'Critical', `${financialMetrics.profitMargin}%`]
             ],
             theme: 'grid',
             headStyles: { fillColor: [79, 70, 229], textColor: [255, 255, 255], fontStyle: 'bold', font: 'Roboto' },
@@ -619,8 +506,8 @@ const Dashboard = () => {
         currentY = doc.lastAutoTable.finalY + 12;
 
         // Prognosis (Cash & Runway)
-        const currentCash = rawSales.reduce((s, x) => s + (Number(x.amount) || 0), 0) - rawExpenses.reduce((s, x) => s + (Number(x.amount) || 0), 0);
-        const runwayDays = forecast?.runwayDays !== undefined ? (forecast.runwayDays > 1000 ? '365+' : forecast.runwayDays) : (metrics.burnRate > 0 ? Math.floor(currentCash / metrics.burnRate) : '365+');
+        const currentCash = financialMetrics.cashBalance;
+        const runwayDays = forecast?.runwayDays !== undefined ? (forecast.runwayDays > 1000 ? '365+' : forecast.runwayDays) : (financialMetrics.dailyBurn > 0 ? Math.floor(currentCash / financialMetrics.dailyBurn) : '365+');
 
         doc.setFontSize(14);
         doc.setTextColor(15, 23, 42);
@@ -765,7 +652,7 @@ const Dashboard = () => {
     }
 
     // --- EMPTY STATE RENDERING ---
-    if (!isLoading && !metrics.hasRealData) {
+    if (!isLoading && !financialMetrics.hasRealData) {
         return (
             <div className="flex h-screen w-full bg-[#09090b] overflow-hidden font-sans text-neutral-200">
                 <Sidebar onLogout={logout} />
@@ -810,12 +697,12 @@ const Dashboard = () => {
         );
     }
 
-    const currentCash = rawSales.reduce((sum, s) => sum + (Number(s.amount)||0), 0) - rawExpenses.reduce((sum, e) => sum + (Number(e.amount)||0), 0);
-    const runwayDays = forecast?.runwayDays !== undefined ? (forecast.runwayDays > 1000 ? '365+' : forecast.runwayDays) : (metrics.burnRate > 0 ? Math.floor(currentCash / metrics.burnRate) : '365+');
+    const currentCash = financialMetrics.cashBalance;
+    const runwayDays = forecast?.runwayDays !== undefined ? (forecast.runwayDays > 1000 ? '365+' : forecast.runwayDays) : (financialMetrics.dailyBurn > 0 ? Math.floor(currentCash / financialMetrics.dailyBurn) : '365+');
 
     // Calculate REAL Forecast Accuracy based on historical volatility (Coefficient of Variation)
     const calculateAccuracyRate = () => {
-        if (!metrics.hasRealData || (rawSales.length === 0 && rawExpenses.length === 0)) return { rate: 0, sub: 'No Data' };
+        if (!financialMetrics.hasRealData || (rawSales.length === 0 && rawExpenses.length === 0)) return { rate: 0, sub: 'No Data' };
         
         const dailyFlows = {};
         [...rawSales.map(s => ({...s, type: 'in'})), ...rawExpenses.map(e => ({...e, type: 'out'}))].forEach(txn => {
@@ -877,7 +764,7 @@ const Dashboard = () => {
                             </div>
                             
                             <select 
-                                value={dateFilter}
+                                value={dateRange}
                                 onChange={handleFilterChange}
                                 className="px-4 py-2 rounded-lg border border-white/10 bg-white/[0.02] text-sm text-neutral-300 hover:bg-white/[0.04] transition-colors cursor-pointer outline-none focus:border-white/20 appearance-none"
                             >
@@ -1066,25 +953,25 @@ const Dashboard = () => {
                         {[
                             { 
                                 label: 'Total Revenue', 
-                                value: filteredData.revenue, 
-                                trend: filteredData.salesTrend, 
-                                sparkline: filteredData.revenueSparkline,
+                                value: financialMetrics.totalRevenue, 
+                                trend: financialMetrics.salesTrend, 
+                                sparkline: chartData.revenueSparkline,
                                 color: '#3b82f6',
                                 inv: false 
                             },
                             { 
                                 label: 'Total Expenses', 
-                                value: filteredData.expenses, 
-                                trend: filteredData.expensesTrend, 
-                                sparkline: filteredData.expensesSparkline,
+                                value: financialMetrics.totalExpenses, 
+                                trend: financialMetrics.expensesTrend, 
+                                sparkline: chartData.expensesSparkline,
                                 color: '#f43f5e',
                                 inv: true 
                             },
                             { 
                                 label: 'Net Profit', 
-                                value: filteredData.netProfit, 
-                                trend: filteredData.netProfit >= 0 ? filteredData.profitMargin : -filteredData.profitMargin, 
-                                sparkline: filteredData.profitSparkline,
+                                value: financialMetrics.netProfit, 
+                                trend: financialMetrics.netProfit >= 0 ? financialMetrics.profitMargin : -financialMetrics.profitMargin, 
+                                sparkline: chartData.profitSparkline,
                                 color: '#10b981',
                                 inv: false,
                                 isMarginTrend: true
@@ -1118,7 +1005,7 @@ const Dashboard = () => {
                             <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/0 to-emerald-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none" />
                             <div>
                                 <h3 className="text-sm text-neutral-400 font-medium mb-3">Profit Margin</h3>
-                                <p className="text-2xl font-semibold text-white tracking-tight">{filteredData.profitMargin}%</p>
+                                <p className="text-2xl font-semibold text-white tracking-tight">{financialMetrics.profitMargin}%</p>
                                 <p className="text-xs text-neutral-500 mt-1">in selected period</p>
                             </div>
                             <div className="relative w-16 h-16 flex items-center justify-center group-hover:scale-105 transition-transform duration-300">
@@ -1132,11 +1019,11 @@ const Dashboard = () => {
                                         strokeLinecap="round"
                                         strokeDasharray="175" 
                                         initial={{ strokeDashoffset: 175 }}
-                                        animate={{ strokeDashoffset: 175 - (175 * Number(filteredData.profitMargin)) / 100 }} 
+                                        animate={{ strokeDashoffset: 175 - (175 * Number(financialMetrics.profitMargin)) / 100 }} 
                                         transition={{ duration: 1.5, ease: "easeOut", delay: 0.5 }}
                                     />
                                 </svg>
-                                <span className="absolute text-xs font-semibold text-white">{Math.round(Number(filteredData.profitMargin))}%</span>
+                                <span className="absolute text-xs font-semibold text-white">{Math.round(Number(financialMetrics.profitMargin))}%</span>
                             </div>
                         </Motion.div>
                     </div>
@@ -1153,15 +1040,15 @@ const Dashboard = () => {
                                         <span className="flex items-center gap-2 text-neutral-400"><div className="w-2 h-2 rounded-full bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.5)]" /> Outflow</span>
                                     </div>
                                 </div>
-                                <span className="text-xs text-neutral-400 bg-white/5 border border-white/10 px-2.5 py-1 rounded-md">{dateFilter === 'all' ? 'All Time' : (dateFilter === 'month' ? 'This Month' : 'Past 30 Days')}</span>
+                                <span className="text-xs text-neutral-400 bg-white/5 border border-white/10 px-2.5 py-1 rounded-md">{dateRange === 'all' ? 'All Time' : (dateRange === 'month' ? 'This Month' : 'Past 30 Days')}</span>
                             </div>
                             <div className="mb-4">
-                                <p className="text-3xl font-semibold text-white tracking-tight">{formatCurrency(filteredData.netProfit)}</p>
+                                <p className="text-3xl font-semibold text-white tracking-tight">{formatCurrency(financialMetrics.netProfit)}</p>
                                 <p className="text-xs text-neutral-500 mt-1">Net Cash Flow</p>
                             </div>
                             <div className="flex-1 min-h-0 relative z-10">
                                 <ResponsiveContainer width="100%" height="100%">
-                                    <AreaChart data={filteredData.revenueVsExpensesChart} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
+                                    <AreaChart data={chartData.revenueVsExpensesChart} margin={{ top: 10, right: 0, left: -20, bottom: 0 }}>
                                         <defs>
                                             <linearGradient id="colorIn" x1="0" y1="0" x2="0" y2="1">
                                                 <stop offset="5%" stopColor="#10b981" stopOpacity={0.6} />
@@ -1233,7 +1120,7 @@ const Dashboard = () => {
                                 </button>
                             </div>
                             <div className="flex-1 overflow-y-auto space-y-2 pr-2 custom-scrollbar">
-                                {filteredData.recentTransactions.length > 0 ? filteredData.recentTransactions.map((txn, idx) => (
+                                {chartData.recentTransactions.length > 0 ? chartData.recentTransactions.map((txn, idx) => (
                                     <Motion.div 
                                         initial={{ opacity: 0, x: -10 }}
                                         animate={{ opacity: 1, x: 0 }}
@@ -1269,8 +1156,8 @@ const Dashboard = () => {
                         </div>
                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
                             {[
-                                { label: 'Data Coverage', value: metrics.salesCount + metrics.expensesCount, sub: 'Records Parsed', icon: Shield, color: 'text-blue-400', bg: 'bg-blue-500/10' },
-                                { label: 'Rolling Burn', value: formatCurrency(metrics.burnRate), sub: 'Last 30D Avg', icon: Flame, color: 'text-rose-400', bg: 'bg-rose-500/10' },
+                                { label: 'Data Coverage', value: financialMetrics.salesCount + financialMetrics.expensesCount, sub: 'Records Parsed', icon: Shield, color: 'text-blue-400', bg: 'bg-blue-500/10' },
+                                { label: 'Rolling Burn', value: formatCurrency(financialMetrics.dailyBurn), sub: 'Last 30D Avg', icon: Flame, color: 'text-rose-400', bg: 'bg-rose-500/10' },
                                 { 
                                     label: 'Forecast Accuracy', 
                                     value: `${accuracyData.rate}%`, 

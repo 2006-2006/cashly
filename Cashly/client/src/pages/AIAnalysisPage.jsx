@@ -6,6 +6,7 @@ import {
 import api from '../api/axios';
 import { supabase } from '../lib/supabase';
 import AuthContext from '../contexts/AuthContext';
+import { useFinancialData } from '../contexts/FinancialDataContext';
 import Sidebar from '../components/Sidebar';
 import { motion as Motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
@@ -19,46 +20,18 @@ import { formatCurrency } from '../lib/formatters';
 
 const AIAnalysisPage = () => {
     const { selectedBusiness } = useContext(AuthContext);
-    const [currentCash, setCurrentCash] = useState(() => {
-        const saved = localStorage.getItem(`cashly_balance_${selectedBusiness?.id || 'default'}`);
-        return saved ? Number(saved) : 100000;
-    });
-
-    useEffect(() => {
-        if (selectedBusiness?.id) {
-            const saved = localStorage.getItem(`cashly_balance_${selectedBusiness.id}`);
-            if (saved) setCurrentCash(Number(saved));
-        }
-    }, [selectedBusiness]);
+    const {
+        metrics: financialMetrics,
+        aiGroundingPayload,
+    } = useFinancialData();
     const [loading, setLoading] = useState(false);
     const [chatHistory, setChatHistory] = useState([]);
     const [activeSteps, setActiveSteps] = useState([]);
     const [toolsUsed, setToolsUsed] = useState([]);
-    const [metrics, setMetrics] = useState(null);
     const [situation, setSituation] = useState(null);
     const [telemetryHistory, setTelemetryHistory] = useState(Array(20).fill(30));
     const [userQuery, setUserQuery] = useState('');
     const chatContainerRef = useRef(null);
-
-    const fetchMetrics = useCallback(async () => {
-        if (!selectedBusiness) return;
-        try {
-            const businessId = selectedBusiness?._id || selectedBusiness?.id;
-            const params = { businessId };
-            const { data } = await api.get('/data/metrics', { params });
-            setMetrics({
-                totalSales: data.totalSales,
-                totalExpenses: data.totalExpenses,
-                netProfit: data.netProfit,
-                profitMargin: data.profitMargin,
-                totalReceivables: data.totalReceivables,
-                salesCount: data.salesCount,
-                expensesCount: data.expensesCount
-            });
-        } catch (e) {
-            console.error('Metrics error:', e);
-        }
-    }, [selectedBusiness]);
 
     const fetchSituation = useCallback(async () => {
         if (!selectedBusiness) return;
@@ -112,9 +85,9 @@ const AIAnalysisPage = () => {
                 status:             sit.status || 'Unknown',
                 insights:           sit.insights || [],
                 components:         sit.components || {},
-                cashBalance:        sit.cashBalance ?? currentCash,
-                runway:             sit.runway ?? 0,
-                dailyBurn:          sit.dailyBurn ?? 0,
+                cashBalance:        sit.cashBalance ?? financialMetrics.cashBalance,
+                runway:             sit.runway ?? financialMetrics.runwayDays,
+                dailyBurn:          sit.dailyBurn ?? financialMetrics.dailyBurn,
                 inflowOpportunity,
                 velocity:           { change: velocityChange, trend: velocityChange > 0 ? 'up' : 'down' },
                 telemetry:          { latency: latencyMs, load: Math.min(100, Math.round((latencyMs / 30))) }
@@ -136,20 +109,19 @@ const AIAnalysisPage = () => {
                 telemetry: { latency: 0, load: 0 }
             });
         }
-    }, [selectedBusiness, currentCash]);
+    }, [selectedBusiness, financialMetrics.cashBalance, financialMetrics.runwayDays, financialMetrics.dailyBurn]);
 
     useEffect(() => {
         let isMounted = true;
         if (selectedBusiness) {
             Promise.resolve().then(() => {
                 if (isMounted) {
-                    fetchMetrics();
                     fetchSituation();
                 }
             });
         }
         return () => { isMounted = false; };
-    }, [selectedBusiness, fetchMetrics, fetchSituation]);
+    }, [selectedBusiness, fetchSituation]);
 
     useEffect(() => {
         if (chatContainerRef.current) {
@@ -195,8 +167,19 @@ const AIAnalysisPage = () => {
             const { data } = await api.post('/ai/ask', {
                 query,
                 businessId: selectedBusiness?._id || selectedBusiness?.id,
-                metrics,
-                currentCash,
+                currentCash: financialMetrics.cashBalance,
+                systemContext: aiGroundingPayload,
+                metrics: {
+                    totalSales: financialMetrics.totalRevenue,
+                    totalExpenses: financialMetrics.totalExpenses,
+                    netProfit: financialMetrics.netProfit,
+                    profitMargin: financialMetrics.profitMargin,
+                    totalReceivables: financialMetrics.totalReceivables,
+                    salesCount: financialMetrics.salesCount,
+                    expensesCount: financialMetrics.expensesCount,
+                    burnRate: financialMetrics.dailyBurn,
+                    runwayDays: financialMetrics.runwayDays,
+                },
                 situation
             });
 
@@ -240,7 +223,7 @@ const AIAnalysisPage = () => {
             }]);
         }
         setLoading(false);
-    }, [userQuery, selectedBusiness, metrics, situation, fetchSituation]);
+    }, [userQuery, selectedBusiness, financialMetrics, aiGroundingPayload, situation, fetchSituation]);
 
     const handleReset = () => {
         setChatHistory([]);
@@ -305,23 +288,23 @@ const AIAnalysisPage = () => {
                                         </Motion.button>
                                     ))}
                                 </div>
-                                {metrics && (
+                                {financialMetrics.hasRealData && (
                                     <Motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.6 }} className="grid grid-cols-2 md:grid-cols-4 gap-4 w-full max-w-2xl px-4">
                                         <div className="p-4 rounded-2xl bg-white/5 border border-white/5 backdrop-blur-sm">
                                             <p className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Revenue</p>
-                                            <p className="text-lg font-bold text-emerald-400">{formatCurrency(metrics.totalSales)}</p>
+                                            <p className="text-lg font-bold text-emerald-400">{formatCurrency(financialMetrics.totalRevenue)}</p>
                                         </div>
                                         <div className="p-4 rounded-2xl bg-white/5 border border-white/5 backdrop-blur-sm">
                                             <p className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Expenses</p>
-                                            <p className="text-lg font-bold text-rose-400">{formatCurrency(metrics.totalExpenses)}</p>
+                                            <p className="text-lg font-bold text-rose-400">{formatCurrency(financialMetrics.totalExpenses)}</p>
                                         </div>
                                         <div className="p-4 rounded-2xl bg-white/5 border border-white/5 backdrop-blur-sm">
                                             <p className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Net Profit</p>
-                                            <p className={cn("text-lg font-bold", metrics.netProfit >= 0 ? "text-indigo-400" : "text-amber-400")}>{formatCurrency(metrics.netProfit)}</p>
+                                            <p className={cn("text-lg font-bold", financialMetrics.netProfit >= 0 ? "text-indigo-400" : "text-amber-400")}>{formatCurrency(financialMetrics.netProfit)}</p>
                                         </div>
                                         <div className="p-4 rounded-2xl bg-white/5 border border-white/5 backdrop-blur-sm">
                                             <p className="text-[10px] text-white/40 uppercase tracking-widest mb-1">Margin</p>
-                                            <p className="text-lg font-bold text-white">{metrics.profitMargin}%</p>
+                                            <p className="text-lg font-bold text-white">{financialMetrics.profitMargin}%</p>
                                         </div>
                                     </Motion.div>
                                 )}
@@ -501,16 +484,16 @@ const AIAnalysisPage = () => {
                                 </div>
                                 <div className="p-4 rounded-2xl bg-white/5 border border-white/10 relative overflow-hidden group">
                                     <div className="relative z-10">
-                                        <p className="text-[40px] font-black leading-tight tracking-tighter text-white">{situation.runway >= 365 ? '365+' : situation.runway}<span className="text-sm font-bold text-white/40 ml-2 uppercase tracking-widest">Days Runway</span></p>
+                                        <p className="text-[40px] font-black leading-tight tracking-tighter text-white">{(situation.runway ?? financialMetrics.runwayDays) >= 365 ? '365+' : (situation.runway ?? financialMetrics.runwayDays)}<span className="text-sm font-bold text-white/40 ml-2 uppercase tracking-widest">Days Runway</span></p>
                                         <div className="mt-2 flex items-center gap-4 border-t border-white/5 pt-3">
                                             <div>
                                                 <p className="text-[10px] text-white/40 uppercase font-bold">Cash Balance</p>
-                                                <p className="text-sm font-bold text-white">{formatCurrency(situation.cashBalance)}</p>
+                                                <p className="text-sm font-bold text-white">{formatCurrency(financialMetrics.cashBalance)}</p>
                                             </div>
                                             <div className="w-px h-8 bg-white/5" />
                                             <div>
                                                 <p className="text-[10px] text-white/40 uppercase font-bold">Daily Burn</p>
-                                                <p className="text-sm font-bold text-rose-400">{formatCurrency(situation.dailyBurn)}</p>
+                                                <p className="text-sm font-bold text-rose-400">{formatCurrency(financialMetrics.dailyBurn)}</p>
                                             </div>
                                         </div>
                                     </div>
